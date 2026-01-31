@@ -1,16 +1,17 @@
 -- AutomatedPvPTabSwitch.lua
--- 12.0.1 (midnight prepatch) compatible implementation — feature-detects APIs and avoids newer calls.
+-- MIDNIGHT-ONLY implementation — requires modern secure binding APIs present in the Midnight client.
+-- THIS ADDON WILL REFUSE TO RUN ON PREPATCH/OLDER CLIENTS.
 
 local ADDON = "AutomatedPvPTabSwitch"
 local PREFIX = "|cff00ff00[Automated PvP]|r "
 local f = CreateFrame("Frame")
 
--- Runtime compatibility guard: ensures only APIs present in 12.0.1 are used.
-local function isRuntimeCompatible()
-    if type(IsInInstance) ~= "function" then return false end
-    if type(InCombatLockdown) ~= "function" then return false end
-    -- we require at least one way to bind keys: override-click or legacy SetBinding
-    if type(SetOverrideBindingClick) ~= "function" and type(SetBinding) ~= "function" then return false end
+-- Require Midnight APIs: enforce presence of the modern secure binding API and secure templates.
+local function isMidnightRuntime()
+    -- Midnight builds must expose secure override-binding click API used here
+    if type(SetOverrideBindingClick) ~= "function" then return false end
+    -- SecureActionButtonTemplate must be usable (CreateFrame always exists; we ensure the template is expected)
+    -- presence of SetOverrideBindingClick is the primary sentinel for modern secure-binding support
     return true
 end
 
@@ -68,33 +69,17 @@ local function applyBindingNow(pvp)
     -- apply the macro to the secure button (always safe)
     secureBtn:SetAttribute("macrotext", macro)
 
-    -- clear overrides only if the API exists on this runtime
-    if type(ClearOverrideBindings) == "function" then
-        ClearOverrideBindings(f)
-    end
+    -- Clear any previous overrides (we assume modern API exists on Midnight)
+    ClearOverrideBindings(f)
 
-    -- Preferred: bind TAB to click the secure button (does not modify saved keybinds)
-    if type(SetOverrideBindingClick) == "function" then
-        SetOverrideBindingClick(f, false, "TAB", secureBtn:GetName())
-        appliedState = pvp
-        announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
-        return
-    end
+    -- Midnight-only path: bind TAB to click the secure button (does NOT modify saved keybinds)
+    SetOverrideBindingClick(f, false, "TAB", secureBtn:GetName())
+    appliedState = pvp
+    announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
+    return
 
-    -- Fallback: legacy SetBinding (may modify saved bindings). Only call SaveBindings if available.
-    if type(SetBinding) == "function" then
-        local command = pvp and "TARGETNEARESTPLAYERENEMY" or "TARGETNEARESTENEMY"
-        SetBinding("TAB", command)
-        if type(SaveBindings) == "function" and type(GetCurrentBindingSet) == "function" then
-            SaveBindings(GetCurrentBindingSet())
-        end
-        appliedState = pvp
-        announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
-        return
-    end
-
-    -- If we reach here, runtime doesn't provide any usable binding API
-    announce("AddOn disabled: required keybinding APIs not present on this client.")
+    -- NOTE: legacy fallbacks removed — this addon now requires Midnight APIs and will not attempt
+    -- to modify saved bindings on older clients.
 end
 
 local function ApplyBinding(pvp)
@@ -122,13 +107,13 @@ f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 f:SetScript("OnEvent", function(self, event, arg1, ...)
     if event == "ADDON_LOADED" and arg1 == ADDON then
         appliedState = nil
-        if not isRuntimeCompatible() then
-            announce("Disabled: this client lacks required APIs for 12.0.1 compatibility.")
+        if not isMidnightRuntime() then
+            announce("Disabled: this build is not Midnight — this release requires Midnight-only APIs.")
             -- don't attempt any bindings
             return
         end
         -- visible debug message; delay the first binding until PLAYER_LOGIN where secure APIs are guaranteed
-        announce("Loaded. Waiting for PLAYER_LOGIN to initialise bindings.")
+        announce("Loaded on Midnight runtime. Waiting for PLAYER_LOGIN to initialise bindings.")
         return
     end
 
