@@ -21,6 +21,7 @@ local function isMidnightRuntime()
 end
 
 local function IsInPvPInstance()
+    -- Primary: direct instance type (arena, pvp, battleground)
     local _, instanceType = IsInInstance()
     if instanceType then
         instanceType = tostring(instanceType):lower()
@@ -29,6 +30,7 @@ local function IsInPvPInstance()
         end
     end
 
+    -- Fallback: GetInstanceInfo (some clients report differently)
     if type(GetInstanceInfo) == "function" then
         local _, giType = GetInstanceInfo()
         if giType and tostring(giType):lower():find("pvp") then
@@ -36,6 +38,17 @@ local function IsInPvPInstance()
         end
     end
 
+    -- Battlefield API: treat any 'active' battlefield as inside a PvP instance
+    if type(GetBattlefieldStatus) == "function" then
+        for i = 1, 7 do
+            local _, status = GetBattlefieldStatus(i)
+            if status and tostring(status):lower() == "active" then
+                return true, status
+            end
+        end
+    end
+
+    -- Optional zone PvP info (guarded)
     if type(GetZonePVPInfo) == "function" then
         local zonePvP = select(1, GetZonePVPInfo())
         if zonePvP and tostring(zonePvP):lower():find("battleground") then
@@ -58,12 +71,30 @@ local function ApplyOverride(pvpType)
     -- clear previous overrides and bind TAB to click the secure button
     ClearOverrideBindings(frame)
     SetOverrideBindingClick(frame, false, "TAB", secureBtn:GetName())
-    isApplied = true
 
-    if pvpType and tostring(pvpType):lower():find("arena") then
-        Print("Arena detected. TAB switched to target enemy players.")
+    -- Verify the override actually took effect; if not, schedule a retry
+    local bound = tostring(GetBindingAction("TAB") or ""):lower()
+    local btnname = tostring(secureBtn:GetName() or ""):lower()
+    if bound:find("click") and bound:find(btnname) then
+        isApplied = true
+        if pvpType and tostring(pvpType):lower():find("arena") then
+            Print("Arena detected. TAB switched to target enemy players.")
+        else
+            Print("Battleground/PvP detected. TAB switched to target enemy players.")
+        end
+        return
+    end
+
+    -- If binding didn't stick, try again shortly (handles race conditions / other addons)
+    isApplied = false
+    Print("Warning: TAB override did not apply immediately — retrying shortly.")
+    if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
+        C_Timer.After(0.5, UpdateState)
+        C_Timer.After(1.5, UpdateState)
+        C_Timer.After(4, UpdateState)
     else
-        Print("Battleground/ PvP detected. TAB switched to target enemy players.")
+        -- fallback immediate retry
+        UpdateState()
     end
 end
 
@@ -165,16 +196,19 @@ frame:SetScript("OnEvent", function(_, event, ...)
     end
 
     if event == "PLAYER_ENTERING_WORLD" then
-        -- sometimes battleground state is finalised slightly after this event; do an immediate + delayed check
+        -- battleground/instance state may finalise slightly after this event; do immediate + delayed checks
         UpdateState()
         scheduleUpdate(0.5)
         scheduleUpdate(2)
+        scheduleUpdate(4)
         return
     end
 
     if event == "UPDATE_BATTLEFIELD_STATUS" then
-        -- battlefield queue/confirm/enter updates
+        -- battlefield queue/confirm/enter updates — run several rechecks because join timing varies
         scheduleUpdate(0.3)
+        scheduleUpdate(1.5)
+        scheduleUpdate(4)
         return
     end
 
