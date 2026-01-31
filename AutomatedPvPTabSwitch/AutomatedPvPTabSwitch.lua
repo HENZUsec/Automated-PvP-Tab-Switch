@@ -1,13 +1,47 @@
 -- AutomatedPvPTabSwitch.lua
--- Adds announcements and combat-safe binding application.
+-- 12.0.1 (midnight prepatch) compatible implementation — feature-detects APIs and avoids newer calls.
 
 local ADDON = "AutomatedPvPTabSwitch"
 local PREFIX = "|cff00ff00[Automated PvP]|r "
 local f = CreateFrame("Frame")
 
+-- Runtime compatibility guard: ensures only APIs present in 12.0.1 are used.
+local function isRuntimeCompatible()
+    if type(IsInInstance) ~= "function" then return false end
+    if type(InCombatLockdown) ~= "function" then return false end
+    -- we require at least one way to bind keys: override-click or legacy SetBinding
+    if type(SetOverrideBindingClick) ~= "function" and type(SetBinding) ~= "function" then return false end
+    return true
+end
+
 local function IsInPvPZone()
-    local instType = select(2, IsInInstance())
-    return instType == "arena" or instType == "pvp"
+    -- Use only APIs that exist on 12.0.1; guard optional calls.
+    local function isPvPType(t)
+        if not t then return false end
+        t = tostring(t):lower()
+        if t:find("pvp") then return true end
+        if t:find("arena") then return true end
+        if t:find("battleground") then return true end
+        return false
+    end
+
+    -- primary: IsInInstance()
+    local _, instType = IsInInstance()
+    if isPvPType(instType) then return true end
+
+    -- fallback: GetInstanceInfo() — present in 12.0.1 but feature-detect anyway
+    if type(GetInstanceInfo) == "function" then
+        local _, giType = GetInstanceInfo()
+        if isPvPType(giType) then return true end
+    end
+
+    -- optional: GetZonePVPInfo existed on many clients but may not be present everywhere — only call if available
+    if type(GetZonePVPInfo) == "function" then
+        local zonePvP = select(1, GetZonePVPInfo())
+        if isPvPType(zonePvP) then return true end
+    end
+
+    return false
 end
 
 -- Apply the TAB binding (combat-safe). If in combat, queue the change.
@@ -31,23 +65,36 @@ local function applyBindingNow(pvp)
     -- macros are more future-proof than raw action names
     local macro = pvp and "/targetenemyplayer" or "/targetenemy"
 
-    -- attempt secure-override binding (preferred)
+    -- apply the macro to the secure button (always safe)
     secureBtn:SetAttribute("macrotext", macro)
-    ClearOverrideBindings(f)
-    -- SetOverrideBindingClick binds the key to click the secure button which runs the macro
-    if SetOverrideBindingClick then
+
+    -- clear overrides only if the API exists on this runtime
+    if type(ClearOverrideBindings) == "function" then
+        ClearOverrideBindings(f)
+    end
+
+    -- Preferred: bind TAB to click the secure button (does not modify saved keybinds)
+    if type(SetOverrideBindingClick) == "function" then
         SetOverrideBindingClick(f, false, "TAB", secureBtn:GetName())
         appliedState = pvp
         announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
         return
     end
 
-    -- fallback: older/rare environments — try regular bindings
-    local command = pvp and "TARGETNEARESTPLAYERENEMY" or "TARGETNEARESTENEMY"
-    SetBinding("TAB", command)
-    SaveBindings(GetCurrentBindingSet())
-    appliedState = pvp
-    announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
+    -- Fallback: legacy SetBinding (may modify saved bindings). Only call SaveBindings if available.
+    if type(SetBinding) == "function" then
+        local command = pvp and "TARGETNEARESTPLAYERENEMY" or "TARGETNEARESTENEMY"
+        SetBinding("TAB", command)
+        if type(SaveBindings) == "function" and type(GetCurrentBindingSet) == "function" then
+            SaveBindings(GetCurrentBindingSet())
+        end
+        appliedState = pvp
+        announce(pvp and "Switching to PvP tab — using TAB to target players." or "Restored normal tab (targets NPCs).")
+        return
+    end
+
+    -- If we reach here, runtime doesn't provide any usable binding API
+    announce("AddOn disabled: required keybinding APIs not present on this client.")
 end
 
 local function ApplyBinding(pvp)
@@ -68,15 +115,25 @@ end
 
 -- Events
 f:RegisterEvent("ADDON_LOADED")
+f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 
 f:SetScript("OnEvent", function(self, event, arg1, ...)
     if event == "ADDON_LOADED" and arg1 == ADDON then
-        -- initial debug/visibility message
-        announce("Loaded. Use /reload or zone into a PvP instance to test.")
-        -- set initial state (safe: may be called before LOGIN but OK on ADDON_LOADED)
         appliedState = nil
+        if not isRuntimeCompatible() then
+            announce("Disabled: this client lacks required APIs for 12.0.1 compatibility.")
+            -- don't attempt any bindings
+            return
+        end
+        -- visible debug message; delay the first binding until PLAYER_LOGIN where secure APIs are guaranteed
+        announce("Loaded. Waiting for PLAYER_LOGIN to initialise bindings.")
+        return
+    end
+
+    if event == "PLAYER_LOGIN" then
+        -- secure APIs are ready — apply binding for the first time
         ApplyBinding(IsInPvPZone())
         return
     end

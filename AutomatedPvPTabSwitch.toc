@@ -1,6 +1,0 @@
-## Interface: 12001
-## Title: Automated PvP Tab Switch
-## Notes: Switches Tab keybind in PvP zones
-## Author: HENZUsec
-## Version: 1.0.0
-AutomatedPvPTabSwitch.lua
