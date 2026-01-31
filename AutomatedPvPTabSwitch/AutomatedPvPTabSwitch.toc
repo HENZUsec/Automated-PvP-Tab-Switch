@@ -2,6 +2,6 @@
 ## Title: Automated PvP Tab Switch
 ## Notes: Automatically switches TAB targeting to enemy players in arenas.
 ## Author: HENZU
-## Version: 1.1.0
+## Version: 1.4.0
 
 AutomatedPvPTabSwitch.lua

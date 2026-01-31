@@ -1,223 +1,102 @@
--- Automated PvP Tab Switch
--- Patch: 12.0.0 (Midnight pre-patch)
--- Arena behavior:
---   TAB -> TARGETNEARESTENEMYPLAYER
--- Outside arena:
---   TAB -> user's normal binding
+-- Automated PvP Tab Switch (12.0.0 / Interface 120000)
+-- PvP instances (arena + battleground): TAB -> TARGETNEARESTENEMYPLAYER
+-- Non-PvP instances: TAB -> TARGETNEARESTENEMY
+--
+-- Uses PRIORITY override bindings and only prints when mode actually changes.
 
-local ADDON_TAG = "|cff00ff88Automated PvP Tab Switch|r:"
+local f = CreateFrame("Frame")
+local lastMode = nil         -- "PVP" or "PVE"
+local pendingMode = nil      -- boolean or nil (true = pvp, false = pve)
 
-local frame = CreateFrame("Frame")
-local isApplied = false
-local pendingAfterCombat = false
-
-local function Print(msg)
-    DEFAULT_CHAT_FRAME:AddMessage(ADDON_TAG .. " " .. msg)
+local function IsInstancedPvP()
+    -- GetInstanceInfo is reliable for differentiating "pvp" and "arena"
+    local _, instanceType = GetInstanceInfo()
+    return instanceType == "pvp" or instanceType == "arena"
 end
 
--- MIDNIGHT-only: unified PvP detection (arena + battleground) and secure override via a macro button
-local function isMidnightRuntime()
-    return type(SetOverrideBindingClick) == "function"
+local function VerifyTab()
+    -- true => include override bindings in the lookup
+    return GetBindingAction("TAB", true)
 end
 
-local function IsInPvPInstance()
-    -- Primary: direct instance type (arena, pvp, battleground)
-    local _, instanceType = IsInInstance()
-    if instanceType then
-        instanceType = tostring(instanceType):lower()
-        if instanceType:find("arena") or instanceType:find("pvp") or instanceType:find("battleground") then
-            return true, instanceType
-        end
-    end
-
-    -- Fallback: GetInstanceInfo (some clients report differently)
-    if type(GetInstanceInfo) == "function" then
-        local _, giType = GetInstanceInfo()
-        if giType and tostring(giType):lower():find("pvp") then
-            return true, giType
-        end
-    end
-
-    -- Battlefield API: treat any 'active' battlefield as inside a PvP instance
-    if type(GetBattlefieldStatus) == "function" then
-        for i = 1, 7 do
-            local _, status = GetBattlefieldStatus(i)
-            if status and tostring(status):lower() == "active" then
-                return true, status
-            end
-        end
-    end
-
-    -- Optional zone PvP info (guarded)
-    if type(GetZonePVPInfo) == "function" then
-        local zonePvP = select(1, GetZonePVPInfo())
-        if zonePvP and tostring(zonePvP):lower():find("battleground") then
-            return true, zonePvP
-        end
-    end
-
-    return false, nil
-end
-
--- secure macro button (Midnight)
-local secureBtn = CreateFrame("Button", "" .. ADDON_TAG .. "SecureBtn", UIParent, "SecureActionButtonTemplate")
-secureBtn:SetAttribute("type", "macro")
-
-local function ApplyOverride(pvpType)
-    -- pvpType: string like 'arena' or 'battleground' (may be nil)
-    local macro = "/targetenemyplayer"
-    secureBtn:SetAttribute("macrotext", macro)
-
-    -- clear previous overrides and bind TAB to click the secure button
-    ClearOverrideBindings(frame)
-    SetOverrideBindingClick(frame, false, "TAB", secureBtn:GetName())
-
-    -- Verify the override actually took effect; if not, schedule a retry
-    local bound = tostring(GetBindingAction("TAB") or ""):lower()
-    local btnname = tostring(secureBtn:GetName() or ""):lower()
-    if bound:find("click") and bound:find(btnname) then
-        isApplied = true
-        if pvpType and tostring(pvpType):lower():find("arena") then
-            Print("Arena detected. TAB switched to target enemy players.")
+local function PrintMode(isPvP, ok, detail)
+    if isPvP then
+        if ok then
+            print("|cffe3ab2dAutomated PvP Tab Switch:|r |cffff7d0a[PvP]|r TAB -> Enemy Players")
         else
-            Print("Battleground/PvP detected. TAB switched to target enemy players.")
+            print("|cffe3ab2dAutomated PvP Tab Switch:|r |cffff7d0a[PvP]|r failed: " .. (detail or "unknown"))
         end
-        return
-    end
-
-    -- If binding didn't stick, try again shortly (handles race conditions / other addons)
-    isApplied = false
-    Print("Warning: TAB override did not apply immediately — retrying shortly.")
-    if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
-        C_Timer.After(0.5, UpdateState)
-        C_Timer.After(1.5, UpdateState)
-        C_Timer.After(4, UpdateState)
     else
-        -- fallback immediate retry
-        UpdateState()
+        if ok then
+            print("|cffe3ab2dAutomated PvP Tab Switch:|r |cff00ff00[PvE]|r TAB -> Nearest Enemy")
+        else
+            print("|cffe3ab2dAutomated PvP Tab Switch:|r |cff00ff00[PvE]|r failed: " .. (detail or "unknown"))
+        end
     end
 end
 
-local function ClearOverride()
-    ClearOverrideBindings(frame)
-    isApplied = false
-    Print("Left PvP instance. TAB restored to your normal binding.")
-end
+local function ApplyTabBinding(isPvP)
+    local mode = isPvP and "PVP" or "PVE"
+    if lastMode == mode then return end
 
-local function scheduleUpdate(delay)
-    if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
-        C_Timer.After(delay, UpdateState)
-    else
-        -- fallback: call immediately (shouldn't happen on Midnight)
-        UpdateState()
-    end
-end
-
-function UpdateState()
-    if not isMidnightRuntime() then
-        Print("Disabled: this build is not Midnight — addon requires Midnight-only APIs.")
-        return
-    end
-
+    -- Combat lockdown: defer once, do not spam
     if InCombatLockdown() then
-        pendingAfterCombat = true
-        frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+        pendingMode = isPvP
+        f:RegisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
 
--- Slash / diagnostics
-SLASH_AUTOPVPTAB1 = "/autopvptab"
-SlashCmdList["AUTOPVPTAB"] = function(msg)
-    local cmd = (msg or ""):lower():match("^(%w+)") or "status"
-    if cmd == "testpvp" or cmd == "testbg" then
-        ApplyOverride("battleground")
-        return
-    elseif cmd == "testarena" then
-        ApplyOverride("arena")
-        return
-    elseif cmd == "dump" then
-        Print("--- Autopvptab dump ---")
-        Print("IsInInstance(): " .. tostring(IsInInstance()))
-        if type(GetInstanceInfo) == "function" then
-            local a,b = GetInstanceInfo()
-            Print("GetInstanceInfo() -> " .. tostring(a) .. ", " .. tostring(b))
-        end
-        if type(GetZonePVPInfo) == "function" then
-            local z = select(1, GetZonePVPInfo())
-            Print("GetZonePVPInfo() -> " .. tostring(z))
-        end
-        if type(GetBattlefieldStatus) == "function" then
-            for i=1,7 do
-                local _,status = GetBattlefieldStatus(i)
-                if status and status ~= "" then
-                    Print("GetBattlefieldStatus("..i..") -> "..tostring(status))
-                end
-            end
-        end
-        Print("GetBindingAction('TAB') -> " .. tostring(GetBindingAction("TAB")))
-        Print("------------------------")
-        return
+    lastMode = mode
+    pendingMode = nil
+
+    -- Always reset overrides we own, then set the desired one
+    ClearOverrideBindings(f)
+
+    -- PRIORITY override so we win vs non-priority overrides from other addons
+    if isPvP then
+        SetOverrideBinding(f, true, "TAB", "TARGETNEARESTENEMYPLAYER")
     else
-        if isMidnightRuntime() then
-            Print(isApplied and "Currently using PvP tab." or "Currently using normal tab.")
-        else
-            Print("Disabled — requires Midnight client.")
-        end
-    end
-end
-        Print("Cannot change TAB during combat. Will retry after combat.")
-        return
+        SetOverrideBinding(f, true, "TAB", "TARGETNEARESTENEMY")
     end
 
-    pendingAfterCombat = false
-    frame:UnregisterEvent("PLAYER_REGEN_ENABLED")
-
-    -- check PvP instance; force reapply when entering world to handle BG joins
-    local inPvP, pvpType = IsInPvPInstance()
-    if inPvP then
-        if not isApplied then
-            ApplyOverride(pvpType)
-        else
-            -- re-apply in case bindings were lost (force)
-            ApplyOverride(pvpType)
-        end
-        return
-    end
-
-    if isApplied then
-        ClearOverride()
+    -- Verify (including overrides)
+    local action = VerifyTab()
+    if isPvP and action == "TARGETNEARESTENEMYPLAYER" then
+        PrintMode(true, true)
+    elseif (not isPvP) and action == "TARGETNEARESTENEMY" then
+        PrintMode(false, true)
+    else
+        PrintMode(isPvP, false, "TAB resolves to " .. tostring(action))
     end
 end
 
-frame:SetScript("OnEvent", function(_, event, ...)
+local function Update()
+    ApplyTabBinding(IsInstancedPvP())
+end
+
+-- Events: entering world covers instance transitions; zone change helps in some edge cases
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+
+-- Debug: /apts
+SLASH_APTS1 = "/apts"
+SlashCmdList["APTS"] = function()
+    local _, it = GetInstanceInfo()
+    print("|cffe3ab2dAutomated PvP Tab Switch:|r instanceType=" .. tostring(it) ..
+        " lastMode=" .. tostring(lastMode) ..
+        " TAB(withOverride)=" .. tostring(VerifyTab()))
+end
+
+f:SetScript("OnEvent", function(_, event)
     if event == "PLAYER_REGEN_ENABLED" then
-        if pendingAfterCombat then
-            UpdateState()
+        f:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        if pendingMode ~= nil then
+            -- Force re-apply after combat
+            lastMode = nil
+            ApplyTabBinding(pendingMode)
         end
         return
     end
 
-    if event == "PLAYER_ENTERING_WORLD" then
-        -- battleground/instance state may finalise slightly after this event; do immediate + delayed checks
-        UpdateState()
-        scheduleUpdate(0.5)
-        scheduleUpdate(2)
-        scheduleUpdate(4)
-        return
-    end
-
-    if event == "UPDATE_BATTLEFIELD_STATUS" then
-        -- battlefield queue/confirm/enter updates — run several rechecks because join timing varies
-        scheduleUpdate(0.3)
-        scheduleUpdate(1.5)
-        scheduleUpdate(4)
-        return
-    end
-
-    -- other zone change events
-    UpdateState()
+    Update()
 end)
-
-frame:RegisterEvent("PLAYER_LOGIN")
-frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-frame:RegisterEvent("UPDATE_BATTLEFIELD_STATUS")
-frame:RegisterEvent("PLAYER_REGEN_ENABLED")
