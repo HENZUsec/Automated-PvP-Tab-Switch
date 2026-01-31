@@ -1,6 +1,7 @@
-## Interface: 12001
+## Interface: 120000
 ## Title: Automated PvP Tab Switch
-## Notes: Midnight-only — requires post-12.0 (Midnight) client. Not compatible with prepatch clients.
-## Author: HENZUsec
+## Notes: Automatically switches TAB targeting to enemy players in arenas.
+## Author: HENZU
 ## Version: 1.1.0
+
 AutomatedPvPTabSwitch.lua
